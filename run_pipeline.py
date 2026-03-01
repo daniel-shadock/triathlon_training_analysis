@@ -402,66 +402,6 @@ def save_one_comparison_table(weekly_df: pd.DataFrame) -> Path:
     return out_path
 
 
-def save_dashboard_plot(weekly_df: pd.DataFrame) -> Path:
-    """
-    Saves a 2x2 dashboard figure as PNG.
-    """
-    if weekly_df.empty:
-        raise ValueError("weekly_df is empty; cannot plot.")
-
-    # cap
-    N = int(weekly_df.groupby("build")["week_number"].max().min())
-    plot_df = weekly_df[weekly_df["week_number"] <= N].copy()
-    plot_df = plot_df.sort_values(["build", "week_number"])
-    plot_df["cumulative_hours"] = plot_df.groupby("build")["hours"].cumsum()
-
-    plt.style.use("seaborn-v0_8-darkgrid")
-
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    ax1, ax2, ax3, ax4 = axes.flatten()
-
-    build_order = list(BUILDS.keys())
-
-    for b in build_order:
-        s = plot_df[plot_df["build"] == b]
-        if s.empty:
-            continue
-        ax1.plot(s["week_number"], s["hours"], label=b)
-        ax2.plot(s["week_number"], s["load"], label=b)
-        ax3.plot(s["week_number"], s["avg_hr"], label=b)
-        ax4.plot(s["week_number"], s["cumulative_hours"], label=b)
-
-    ax1.set_title("Weekly Training Hours (capped)")
-    ax1.set_xlabel("Week # in build")
-    ax1.set_ylabel("Hours")
-    ax1.grid(True)
-
-    ax2.set_title("Weekly HR-Based Load (capped)")
-    ax2.set_xlabel("Week # in build")
-    ax2.set_ylabel("Load")
-    ax2.grid(True)
-
-    ax3.set_title("Average Workout HR (capped)")
-    ax3.set_xlabel("Week # in build")
-    ax3.set_ylabel("Avg HR (bpm)")
-    ax3.grid(True)
-
-    ax4.set_title("Cumulative Hours (capped)")
-    ax4.set_xlabel("Week # in build")
-    ax4.set_ylabel("Cumulative Hours")
-    ax4.grid(True)
-
-    handles, labels = ax1.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=3)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    out_path = OUT_DIR / "build_dashboard_2x2.png"
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
-    return out_path
-
-
 def main():
     if not XML_PATH.exists():
         raise FileNotFoundError(f"Cannot find {XML_PATH}. Put export.xml at data/export.xml")
@@ -502,11 +442,292 @@ def main():
     print(f"   saved: {table_path}")
 
     print("8) Saving dashboard plot...")
-    plot_path = save_dashboard_plot(weekly_df)
+    plot_path = save_dashboard_plot(weekly_df, enriched)
     print(f"   saved: {plot_path}")
 
     print("\nDone.")
 
+def save_dashboard_plot(weekly_df: pd.DataFrame, enriched: pd.DataFrame) -> Path:
+    """
+    Saves a 2x4 dashboard figure as PNG with Economist-like styling.
+    Includes:
+      (1) Weekly Hours
+      (2) Weekly HR-Based Load
+      (3) Avg HR
+      (4) Cumulative Hours
+      (5) Total Hours by Event (STACKED, capped)
+      (6) Event Composition (100% STACKED)
+      (7) Notes
+      (8) blank
+    All plots are capped to the shortest build length (weeks 1..N).
+    """
+    if weekly_df.empty:
+        raise ValueError("weekly_df is empty; cannot plot.")
+    if enriched.empty:
+        raise ValueError("enriched is empty; cannot plot event totals.")
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    # ------------------
+    # Economist-ish styling (muted, clean, editorial)
+    # ------------------
+    plt.rcParams.update({
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "axes.edgecolor": "#333333",
+        "axes.linewidth": 0.8,
+        "axes.titlesize": 12,
+        "axes.titleweight": "semibold",
+        "axes.labelsize": 10,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "font.family": "DejaVu Sans",
+        "grid.color": "#D9D9D9",
+        "grid.linewidth": 0.6,
+        "grid.alpha": 0.85,
+        "legend.frameon": False,
+        "lines.linewidth": 2.0,
+    })
+
+    # Muted palette for event stacks (explicit to avoid garish defaults)
+    EVENT_COLORS = {
+        "Swimming":  "#1f77b4",  # muted blue
+        "Cycling":   "#d62728",  # muted red
+        "Running":   "#2ca02c",  # muted green
+        "Strength":  "#7f7f7f",  # neutral gray
+    }
+
+    # ------------------
+    # Cap to shortest build length (weeks 1..N)
+    # ------------------
+    N = int(weekly_df.groupby("build")["week_number"].max().min())
+    plot_df = weekly_df[weekly_df["week_number"] <= N].copy()
+    plot_df = plot_df.sort_values(["build", "week_number"])
+    plot_df["cumulative_hours"] = plot_df.groupby("build")["hours"].cumsum()
+
+    week_map = plot_df[["build", "week", "week_number"]].copy()
+
+    # ------------------
+    # Prepare workout-level data for event totals (capped weeks only)
+    # ------------------
+    df = enriched.copy()
+    df["startDate"] = pd.to_datetime(df["startDate"], errors="coerce").dt.tz_localize(None)
+
+    if "activity" not in df.columns and "workoutActivityType" in df.columns:
+        df["activity"] = (
+            df["workoutActivityType"]
+            .astype(str)
+            .str.replace("HKWorkoutActivityType", "", regex=False)
+        )
+
+    df["duration_min"] = pd.to_numeric(df.get("duration_min", df.get("duration")), errors="coerce")
+    df["hours"] = df["duration_min"] / 60.0
+
+    def assign_build(ts: pd.Timestamp) -> str | None:
+        for b, (start, end) in BUILDS.items():
+            if ts >= pd.Timestamp(start) and (end is None or ts <= pd.Timestamp(end)):
+                return b
+        return None
+
+    df["build"] = df["startDate"].apply(assign_build)
+    df = df.dropna(subset=["build"]).copy()
+    df["week"] = df["startDate"].dt.to_period("W").dt.start_time
+    df = df.merge(week_map, on=["build", "week"], how="inner")
+
+    def bucket_event(a: str) -> str:
+        a = str(a).strip().lower()
+        if "cycling" in a:
+            return "Cycling"
+        if "running" in a:
+            return "Running"
+        if "swimming" in a or "water" in a:
+            return "Swimming"
+        return "Strength"  # strength + walking + other
+
+    df["event_bucket"] = df["activity"].apply(bucket_event)
+    event_totals = df.groupby(["build", "event_bucket"], as_index=False)["hours"].sum()
+
+    build_order = list(BUILDS.keys())
+    event_order = ["Swimming", "Cycling", "Running", "Strength"]
+
+    ev_wide = (
+        event_totals.pivot_table(index="build", columns="event_bucket", values="hours", aggfunc="sum")
+        .reindex(build_order)
+        .reindex(columns=event_order, fill_value=0.0)
+        .fillna(0.0)
+    )
+
+    percent = ev_wide.copy()
+    row_sums = percent.sum(axis=1).replace(0, np.nan)
+    percent = (percent.div(row_sums, axis=0) * 100.0).fillna(0.0)
+
+    # ------------------
+    # Plotting layout
+    # ------------------
+    fig, axes = plt.subplots(2, 4, figsize=(22, 10))
+    ax1, ax2, ax3, ax4, ax5, ax6, ax7, ax8 = axes.flatten()
+
+    def economist_axes(ax):
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.tick_params(axis="both", colors="#333333")
+        ax.grid(True, axis="y")
+        ax.grid(False, axis="x")
+
+    def label_line_end(ax, x, y, label, pad=0.35):
+        """
+        Put a text label at the last point of a line.
+        pad controls small right shift.
+        """
+        if len(x) == 0 or len(y) == 0:
+            return
+        ax.text(
+            x[-1] + pad,
+            y[-1],
+            str(label),
+            va="center",
+            ha="left",
+            fontsize=9,
+            color="#333333",
+            clip_on=False,
+        )
+
+    # 1) Weekly Hours (direct labels, no legend)
+    max_x = 0
+    for b in build_order:
+        s = plot_df[plot_df["build"] == b]
+        if s.empty:
+            continue
+        x = s["week_number"].to_numpy()
+        y = s["hours"].to_numpy()
+        ax1.plot(x, y)
+        label_line_end(ax1, x, y, b)
+        max_x = max(max_x, int(x.max()))
+    ax1.set_title("Weekly Training Hours (capped)")
+    ax1.set_xlabel("Week #")
+    ax1.set_ylabel("Hours")
+    ax1.set_xlim(1, max_x + 2)  # room for labels
+    economist_axes(ax1)
+
+    # 2) Weekly Load
+    max_x = 0
+    for b in build_order:
+        s = plot_df[plot_df["build"] == b]
+        if s.empty:
+            continue
+        x = s["week_number"].to_numpy()
+        y = s["load"].to_numpy()
+        ax2.plot(x, y)
+        label_line_end(ax2, x, y, b)
+        max_x = max(max_x, int(x.max()))
+    ax2.set_title("Weekly HR-Based Load (capped)")
+    ax2.set_xlabel("Week #")
+    ax2.set_ylabel("Load")
+    ax2.set_xlim(1, max_x + 2)
+    economist_axes(ax2)
+
+    # 3) Avg HR
+    max_x = 0
+    for b in build_order:
+        s = plot_df[plot_df["build"] == b]
+        if s.empty:
+            continue
+        x = s["week_number"].to_numpy()
+        y = s["avg_hr"].to_numpy()
+        ax3.plot(x, y)
+        label_line_end(ax3, x, y, b)
+        max_x = max(max_x, int(x.max()))
+    ax3.set_title("Average Workout HR (capped)")
+    ax3.set_xlabel("Week #")
+    ax3.set_ylabel("Avg HR (bpm)")
+    ax3.set_xlim(1, max_x + 2)
+    economist_axes(ax3)
+
+    # 4) Cumulative Hours
+    max_x = 0
+    for b in build_order:
+        s = plot_df[plot_df["build"] == b]
+        if s.empty:
+            continue
+        x = s["week_number"].to_numpy()
+        y = s["cumulative_hours"].to_numpy()
+        ax4.plot(x, y)
+        label_line_end(ax4, x, y, b)
+        max_x = max(max_x, int(x.max()))
+    ax4.set_title("Cumulative Training Hours (capped)")
+    ax4.set_xlabel("Week #")
+    ax4.set_ylabel("Cumulative Hours")
+    ax4.set_xlim(1, max_x + 2)
+    economist_axes(ax4)
+
+    # 5) Stacked hours by event (absolute)
+    x = np.arange(len(ev_wide.index))
+    width = 0.55
+    bottom = np.zeros(len(ev_wide.index))
+
+    for ev in event_order:
+        vals = ev_wide[ev].to_numpy()
+        ax5.bar(x, vals, width=width, bottom=bottom, color=EVENT_COLORS[ev], edgecolor="none")
+        bottom += vals
+
+    ax5.set_title("Total Hours by Event (capped)")
+    ax5.set_xlabel("Build")
+    ax5.set_ylabel("Hours (weeks 1..N)")
+    ax5.set_xticks(x)
+    ax5.set_xticklabels(ev_wide.index)
+    economist_axes(ax5)
+
+    ax5.legend(
+        event_order,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        title="Event",
+    )
+
+    # 6) 100% stacked composition
+    x = np.arange(len(percent.index))
+    bottom = np.zeros(len(percent.index))
+
+    for ev in event_order:
+        vals = percent[ev].to_numpy()
+        ax6.bar(x, vals, width=width, bottom=bottom, color=EVENT_COLORS[ev], edgecolor="none")
+        bottom += vals
+
+    ax6.set_title("Event Composition (% of total hours)")
+    ax6.set_xlabel("Build")
+    ax6.set_ylabel("Percent")
+    ax6.set_xticks(x)
+    ax6.set_xticklabels(percent.index)
+    ax6.set_ylim(0, 100)
+    economist_axes(ax6)
+
+    ax6.legend(
+        event_order,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        title="Event",
+    )
+
+    # 7) Notes
+    overlap = globals().get("OVERLAP_THRESHOLD", None)
+    note_lines = [f"Capped to N = {N} weeks"]
+    if overlap is not None:
+        note_lines.append(f"Overlap threshold = {overlap}")
+    ax7.axis("off")
+    ax7.text(0.0, 0.9, "\n".join(note_lines), fontsize=10, color="#333333", transform=ax7.transAxes)
+
+    # 8) blank
+    ax8.axis("off")
+
+    # Extra room on right for legends; extra room on left/right for line end labels
+    plt.tight_layout(rect=[0, 0, 0.86, 1])
+
+    out_path = OUT_DIR / "build_dashboard_2x4.png"
+    fig.savefig(out_path, dpi=250)
+    plt.close(fig)
+    return out_path
 
 if __name__ == "__main__":
     main()
