@@ -1,0 +1,5 @@
+# Apple Health raw exports
+data/export.xml
+apple_health_export/export_cda.xml
+out/heart_rate.csv
+*.csv
