@@ -27,7 +27,7 @@ Weekly aggregation by build cycle
 Outputs:
     - Enriched workout dataset
     - Weekly comparison table
-    - 2×2 dashboard visualization
+    - 4×2 dashboard visualization
 
 Data: data/export.xml
 Run: run_pipeline.py
