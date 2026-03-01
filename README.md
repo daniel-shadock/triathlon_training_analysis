@@ -29,3 +29,5 @@ Outputs:
     - Weekly comparison table
     - 2×2 dashboard visualization
 
+Data: data/export.xml
+Run: run_pipeline.py
