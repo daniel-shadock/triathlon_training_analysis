@@ -14,6 +14,8 @@ XML_PATH = BASE_DIR / "data" / "export.xml"
 OUT_DIR = BASE_DIR / "out"
 OUT_DIR.mkdir(exist_ok=True)
 
+FAST_MODE = False  # set False when you need to reprocess XML
+
 # Your build windows
 BUILDS = {
     "2024 Build": ("2024-04-28", "2024-09-28"),
@@ -403,9 +405,33 @@ def save_one_comparison_table(weekly_df: pd.DataFrame) -> Path:
 
 
 def main():
+    if FAST_MODE:
+        print("FAST MODE: skipping XML parsing")
+
+        enriched_path = OUT_DIR / "workouts_enriched.csv"
+        weekly_path = OUT_DIR / "weekly_df.csv"
+
+        if not enriched_path.exists():
+            raise FileNotFoundError(f"Missing {enriched_path}. Run FULL MODE once to generate it.")
+        if not weekly_path.exists():
+            raise FileNotFoundError(f"Missing {weekly_path}. Run FULL MODE once to generate it.")
+
+        print("1) Reading enriched workouts + weekly summaries...")
+        enriched = pd.read_csv(enriched_path, parse_dates=["startDate", "endDate"])
+        weekly_df = pd.read_csv(weekly_path, parse_dates=["week"])
+
+        print("2) Saving dashboard plot...")
+        plot_path = save_dashboard_plot(weekly_df, enriched)
+        print(f"   saved: {plot_path}")
+
+        print("\nDone.")
+        return
+
+    # -------- FULL MODE --------
     if not XML_PATH.exists():
         raise FileNotFoundError(f"Cannot find {XML_PATH}. Put export.xml at data/export.xml")
 
+    print("FULL MODE: parsing export.xml")
     print(f"Reading: {XML_PATH}")
 
     print("1) Exporting workouts (with distance stats when present)...")
@@ -426,7 +452,10 @@ def main():
     enriched["endDate"] = enriched["endDate"].dt.tz_localize(None)
 
     print("4) Merging cycling duplicates (keep Strava + merge Watch HR)...")
-    enriched = merge_cycling_duplicates_keep_strava_merge_hr(enriched, overlap_threshold=OVERLAP_THRESHOLD)
+    enriched = merge_cycling_duplicates_keep_strava_merge_hr(
+        enriched,
+        overlap_threshold=OVERLAP_THRESHOLD,
+    )
 
     print("5) Computing load...")
     enriched = add_load(enriched)
@@ -436,6 +465,8 @@ def main():
 
     print("6) Building weekly summaries...")
     weekly_df = build_weekly_df(enriched)
+    weekly_df.to_csv(OUT_DIR / "weekly_df.csv", index=False)
+    print(f"   saved: {OUT_DIR / 'weekly_df.csv'}")
 
     print("7) Saving capped comparison table...")
     table_path = save_one_comparison_table(weekly_df)
@@ -494,7 +525,7 @@ def save_dashboard_plot(weekly_df: pd.DataFrame, enriched: pd.DataFrame) -> Path
     # Muted palette for event stacks (explicit to avoid garish defaults)
     EVENT_COLORS = {
         "Swimming":  "#1f77b4",  # muted blue
-        "Cycling":   "#d62728",  # muted red
+        "Cycling":   "#3ebcd2",  # muted cyan
         "Running":   "#2ca02c",  # muted green
         "Strength":  "#7f7f7f",  # neutral gray
     }
